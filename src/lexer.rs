@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::iter::Peekable;
 use std::str::CharIndices;
 
@@ -13,6 +15,12 @@ pub struct Lexer<'src> {
     src: &'src str,
 }
 
+impl LexErr {
+    fn new(msg: &'static str, offset: usize) -> Self {
+        Self { msg, offset }
+    }
+}
+
 impl<'src> Lexer<'src> {
     /// Create a new Lexer from a &str
     pub fn new(src: &'src str) -> Self {
@@ -21,9 +29,37 @@ impl<'src> Lexer<'src> {
             src,
         }
     }
-    /// Convenience method for directly allocating into a Vec
+    /// Convenience method for directly allocating into a Veg
     pub fn parse(self) -> Result<Vec<Tok<'src>>, LexErr> {
         self.into_iter().collect()
+    }
+    /// Peeks character, then consumes it if it matches, returning
+    /// true on success and false on failure
+    fn eat_if(&mut self, c: char) -> bool {
+        if let Some(&(_, c_inner)) = self.chars.peek() {
+            if c_inner == c {
+                self.chars.next();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+    /// Blindly takes the next char. If it's a digit, we proceed to parse
+    /// a number and return it in a Some; otherwise, we return None.
+    /// Note that the initial character will be consumed.
+    fn consuming_eat_if_digit(&mut self) -> Option<usize> {
+        if let Some((i, c)) = self.chars.next() {
+            if c.is_digit(10) {
+                Some(self.number(i))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
     /// Transforms escaped characters into their specific meanings:
     /// - "\\" is a literal backslash
@@ -40,11 +76,11 @@ impl<'src> Lexer<'src> {
     /// - "\H" is a character class of the digits in base 16 (uppercase)
     fn backslash(&mut self, i: usize) -> Result<Tok<'src>, LexErr> {
         match self.chars.next() {
-            Some((_, 'd')) => Ok(Tok::Class(DIGITS)),
-            Some((_, 'A')) => Ok(Tok::Class(UPPERCASE_ALPHABET)),
-            Some((_, 'a')) => Ok(Tok::Class(LOWERCASE_ALPHABET)),
-            Some((_, 'H')) => Ok(Tok::Class(UPPERCASE_HEX)),
-            Some((_, 'h')) => Ok(Tok::Class(LOWERCASE_HEX)),
+            Some((_, 'd')) => Ok(Tok::Class(Cow::Borrowed(DIGITS))),
+            Some((_, 'A')) => Ok(Tok::Class(Cow::Borrowed(UPPERCASE_ALPHABET))),
+            Some((_, 'a')) => Ok(Tok::Class(Cow::Borrowed(LOWERCASE_ALPHABET))),
+            Some((_, 'H')) => Ok(Tok::Class(Cow::Borrowed(UPPERCASE_HEX))),
+            Some((_, 'h')) => Ok(Tok::Class(Cow::Borrowed(LOWERCASE_HEX))),
             Some((_, '\\')) => Ok(Tok::Char('\\')),
             Some((_, '(')) => Ok(Tok::Char('(')),
             Some((_, ')')) => Ok(Tok::Char(')')),
@@ -53,14 +89,11 @@ impl<'src> Lexer<'src> {
             Some((_, '{')) => Ok(Tok::Char('{')),
             Some((_, '}')) => Ok(Tok::Char('}')),
             Some((i, c)) if c.is_digit(10) => Ok(Tok::BackRef(self.number(i))),
-            Some(_) => Err(LexErr {
-                msg: "backslashes must be followed by a '\\', 'd', 'A', 'a', 'H', or 'h'",
-                offset: i,
-            }),
-            None => Err(LexErr {
-                msg: "unexpected end of input",
-                offset: i,
-            }),
+            Some(_) => Err(LexErr::new(
+                "backslashes must be followed by a '\\', 'd', 'A', 'a', 'H', or 'h'",
+                i,
+            )),
+            None => Err(LexErr::new("unexpected end of input", i)),
         }
     }
     /// Cautiously consumes digits from self.chars (e.g. given "123A", the 'A' remains)
@@ -81,68 +114,31 @@ impl<'src> Lexer<'src> {
     }
     /// Returns a range or repeat token
     fn left_curly(&mut self, i: usize) -> Result<Tok<'src>, LexErr> {
-        if let Some((j, c)) = self.chars.next() {
-            if c.is_digit(10) {
-                // j is starting index of the lower bound
-                let lower = self.number(j);
-                // check for comma after first number
-                if let Some(&(_, ',')) = self.chars.peek() {
-                    self.chars.next();
-                    if let Some((k, c)) = self.chars.next() {
-                        if c.is_digit(10) {
-                            // k is starting index of the upper bound
-                            let upper = self.number(k);
-                            if let Some(&(_, '}')) = self.chars.peek() {
-                                self.chars.next();
-                                // lower must be less than upper to be a valid range
-                                if lower < upper {
-                                    Ok(Tok::Range(lower, upper))
-                                } else if lower == upper {
-                                    Err(LexErr { msg: "bounds cannot be equal in a range; consider using the repeat syntax", offset: i})
-                                } else {
-                                    Err(LexErr {
-                                        msg: "lower bound must be less than upper bound",
-                                        offset: i,
-                                    })
-                                }
-                            } else {
-                                Err(LexErr {
-                                    msg: "expected closing '}' for range",
-                                    offset: i,
-                                })
-                            }
-                        } else {
-                            Err(LexErr {
-                                msg: "ranges must be provided 2 numbers",
-                                offset: i,
-                            })
-                        }
-                    } else {
-                        Err(LexErr {
-                            msg: "ranges must be provided 2 numbers",
-                            offset: i,
-                        })
+        let lower = self
+            .consuming_eat_if_digit()
+            .ok_or(LexErr::new("expected number after {", i))?;
+        if self.eat_if(',') {
+            let upper = self
+                .consuming_eat_if_digit()
+                .ok_or(LexErr::new("range must be provided 2 numbers", i))?;
+            if self.eat_if('}') {
+                match lower.cmp(&upper) {
+                    Ordering::Less => Ok(Tok::Range(lower, upper)),
+                    Ordering::Equal => Err(LexErr::new(
+                        "bounds cannot be equal in a range; consider using the repetition syntax",
+                        i,
+                    )),
+                    Ordering::Greater => {
+                        Err(LexErr::new("lower bound must be less than upper bound", i))
                     }
-                } else if let Some(&(_, '}')) = self.chars.peek() {
-                    self.chars.next();
-                    Ok(Tok::Repeat(lower))
-                } else {
-                    Err(LexErr {
-                        msg: "expected closing '}' for range",
-                        offset: i,
-                    })
                 }
             } else {
-                Err(LexErr {
-                    msg: "ranges must be provided a number",
-                    offset: i,
-                })
+                Err(LexErr::new("expected closing '}' for range", i))
             }
+        } else if self.eat_if('}') {
+            Ok(Tok::Repeat(lower))
         } else {
-            Err(LexErr {
-                msg: "unexpected end of input",
-                offset: i,
-            })
+            Err(LexErr::new("expected closing '}' for repetition", i))
         }
     }
     /// Returns a character class; as of this writing, brackets within the class
@@ -160,12 +156,12 @@ impl<'src> Lexer<'src> {
                         self.chars.next();
                         let rv = &self.src[i + 1..j];
                         return if rv.len() != 0 {
-                            Ok(Tok::Class(rv))
+                            Ok(Tok::Class(Cow::Borrowed(rv)))
                         } else {
-                            Err(LexErr {
-                                msg: "character class must contain a nonzero amount of characters",
-                                offset: i,
-                            })
+                            Err(LexErr::new(
+                                "character class must contain a nonzero amount of characters",
+                                i,
+                            ))
                         };
                     }
                 }
@@ -173,10 +169,10 @@ impl<'src> Lexer<'src> {
             }
             self.chars.next();
         }
-        Err(LexErr {
-            msg: "opening '[' has no corresponding closing ']'",
-            offset: i,
-        })
+        Err(LexErr::new(
+            "opening '[' has no corresponding closing ']'",
+            i,
+        ))
     }
     /// Returns a group by recursively creating a new Parser
     fn left_paren(&mut self, i: usize) -> Result<Tok<'src>, LexErr> {
@@ -188,20 +184,19 @@ impl<'src> Lexer<'src> {
                     depth -= 1;
                     if depth == 0 {
                         self.chars.next();
-                        let rv = &self.src[i + 1..j];
-                        return if rv.len() != 0 {
-                            let inner = Lexer::new(rv).parse();
+                        let substring = &self.src[i + 1..j];
+                        return if substring.len() != 0 {
+                            let inner = Lexer::new(substring).parse();
                             // we need to add to the offset because the error message is relative
                             // to the &str passed in
-                            Ok(Tok::Group(inner.map_err(|e| LexErr {
-                                msg: e.msg,
-                                offset: e.offset + i + 1,
-                            })?))
+                            Ok(Tok::Group(
+                                inner.map_err(|e| LexErr::new(e.msg, e.offset + i + 1))?,
+                            ))
                         } else {
-                            Err(LexErr {
-                                msg: "group must contain a nonzero amount of characters",
-                                offset: i,
-                            })
+                            Err(LexErr::new(
+                                "group must contain a nonzero amount of characters",
+                                i,
+                            ))
                         };
                     }
                 }
@@ -209,10 +204,10 @@ impl<'src> Lexer<'src> {
             }
             self.chars.next();
         }
-        Err(LexErr {
-            msg: "opening '(' has no corresponding closing ')'",
-            offset: i,
-        })
+        Err(LexErr::new(
+            "opening '(' has no corresponding closing ')'",
+            i,
+        ))
     }
 }
 
@@ -224,7 +219,7 @@ pub struct LexErr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tok<'src> {
-    Class(&'src str),
+    Class(Cow<'src, str>),
     Char(char),
     BackRef(usize),
     Repeat(usize),
@@ -235,26 +230,16 @@ pub enum Tok<'src> {
 impl<'src> Iterator for Lexer<'src> {
     type Item = Result<Tok<'src>, LexErr>;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.chars.next() {
-            Some((i, '\\')) => Some(self.backslash(i)),
-            Some((i, '{')) => Some(self.left_curly(i)),
-            Some((i, '[')) => Some(self.left_bracket(i)),
-            Some((i, '(')) => Some(self.left_paren(i)),
-            Some((i, ')')) => Some(Err(LexErr {
-                msg: "unexpected )",
-                offset: i,
-            })),
-            Some((i, ']')) => Some(Err(LexErr {
-                msg: "unexpected ]",
-                offset: i,
-            })),
-            Some((i, '}')) => Some(Err(LexErr {
-                msg: "unexpected }",
-                offset: i,
-            })),
-            Some((_, c @ _)) => Some(Ok(Tok::Char(c))),
-            None => None,
-        }
+        self.chars.next().map(|(i, c)| match c {
+            '\\' => self.backslash(i),
+            '{' => self.left_curly(i),
+            '[' => self.left_bracket(i),
+            '(' => self.left_paren(i),
+            ')' => Err(LexErr::new("unexpected )", i)),
+            ']' => Err(LexErr::new("unexpected ]", i)),
+            '}' => Err(LexErr::new("unexpected }", i)),
+            _ => Ok(Tok::Char(c)),
+        })
     }
 }
 
@@ -274,11 +259,11 @@ mod test {
         assert_eq!(
             Lexer::new(r"\H\h\A\a\d").parse(),
             Ok(vec![
-                Tok::Class(UPPERCASE_HEX),
-                Tok::Class(LOWERCASE_HEX),
-                Tok::Class(UPPERCASE_ALPHABET),
-                Tok::Class(LOWERCASE_ALPHABET),
-                Tok::Class(DIGITS)
+                Tok::Class(Cow::Borrowed(UPPERCASE_HEX)),
+                Tok::Class(Cow::Borrowed(LOWERCASE_HEX)),
+                Tok::Class(Cow::Borrowed(UPPERCASE_ALPHABET)),
+                Tok::Class(Cow::Borrowed(LOWERCASE_ALPHABET)),
+                Tok::Class(Cow::Borrowed(DIGITS))
             ])
         );
         assert_eq!(
@@ -295,10 +280,16 @@ mod test {
     }
     #[test]
     fn character_class() {
-        assert_eq!(Lexer::new("[foo]").parse(), Ok(vec![Tok::Class("foo")]));
+        assert_eq!(
+            Lexer::new("[foo]").parse(),
+            Ok(vec![Tok::Class(Cow::Owned("foo".to_owned()))])
+        );
         assert_eq!(
             Lexer::new("[foo][bar]").parse(),
-            Ok(vec![Tok::Class("foo"), Tok::Class("bar")])
+            Ok(vec![
+                Tok::Class(Cow::Owned("foo".to_owned())),
+                Tok::Class(Cow::Owned("bar".to_owned()))
+            ])
         );
     }
     #[test]
@@ -306,11 +297,8 @@ mod test {
         assert_eq!(Lexer::new("{3}").parse(), Ok(vec![Tok::Repeat(3)]));
         assert_eq!(Lexer::new("{3,5}").parse(), Ok(vec![(Tok::Range(3, 5))]));
         assert_eq!(
-            Lexer::new("{}").parse(),
-            Err(LexErr {
-                msg: "ranges must be provided a number",
-                offset: 0
-            })
+            Lexer::new("{30,50}").parse(),
+            Ok(vec![(Tok::Range(30, 50))])
         );
     }
     #[test]
@@ -321,7 +309,18 @@ mod test {
         );
         assert_eq!(
             Lexer::new("([ab]c)").parse(),
-            Ok(vec![Tok::Group(vec![Tok::Class("ab"), Tok::Char('c')])])
+            Ok(vec![Tok::Group(vec![
+                Tok::Class(Cow::Owned("ab".to_owned())),
+                Tok::Char('c')
+            ])])
+        );
+        assert_eq!(
+            Lexer::new("(a)(b)(c)").parse(),
+            Ok(vec![
+                Tok::Group(vec![Tok::Char('a')]),
+                Tok::Group(vec![Tok::Char('b')]),
+                Tok::Group(vec![Tok::Char('c')])
+            ])
         );
     }
     #[test]
@@ -340,12 +339,12 @@ mod test {
                 Tok::Char('K'),
                 Tok::Char('Y'),
                 Tok::Char('-'),
-                Tok::Group(vec![Tok::Class(UPPERCASE_ALPHABET)]),
-                Tok::Class(UPPERCASE_ALPHABET),
+                Tok::Group(vec![Tok::Class(Cow::Borrowed(UPPERCASE_ALPHABET))]),
+                Tok::Class(Cow::Borrowed(UPPERCASE_ALPHABET)),
                 Tok::Repeat(2),
                 Tok::BackRef(1),
                 Tok::Char('-'),
-                Tok::Class(DIGITS),
+                Tok::Class(Cow::Borrowed(DIGITS)),
                 Tok::Repeat(4)
             ])
         );
