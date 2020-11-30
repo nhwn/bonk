@@ -1,2 +1,4 @@
 /target
 Cargo.lock
+/bonk-macro/Cargo.lock
+/bonk-macro/target

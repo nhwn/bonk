@@ -1,18 +1,16 @@
 [package]
-name = "bonk"
+name = "bonk-macro"
 version = "0.1.0"
 authors = ["Nathan Nguyen <nathan.tm.nguyen@gmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+proc-macro = true
+
 [dependencies]
-bonk-macro = { path = "bonk-macro" }
-
-[dev-dependencies]
-criterion = "0.3"
-itertools = "0.9"
-
-[[bench]]
-name = "iproduct"
-harness = false
+syn = "1.0"
+quote = "1.0"
+num_cpus = "1.13.0"
+proc-macro2 = "1.0.24"
