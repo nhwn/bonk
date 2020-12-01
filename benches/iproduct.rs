@@ -21,7 +21,7 @@ fn iproduct_macro() {
         buf[5] = a1;
         buf[6] = a2;
         buf[7] = a3;
-        buf[8] = d0;
+        buf[9] = d0;
         buf[10] = d1;
         buf[11] = d2;
         buf[12] = d3;

@@ -16,10 +16,7 @@ pub struct Init {
 
 impl Init {
     fn new(value: char, idx: usize) -> Self {
-        Self {
-            value,
-            idx,
-        }
+        Self { value, idx }
     }
 }
 
@@ -75,12 +72,16 @@ impl Dictionary {
             class_id: 0,
         }
     }
+    /// Returns a usize that identifies each unique string
     fn generate_id(&mut self, class: Cow<'static, str>) -> usize {
-        if let Some(&idx) = self.map.get(&class) {
-            idx
+        // can't use entry() because or_insert_with() will capture all of 
+        // self to update class_id in the closure, which results in 2 mutable 
+        // borrows to self
+        if let Some(&class_id) = self.map.get(&class) {
+            class_id
         } else {
             self.map.insert(class, self.class_id);
-            // keep old one so we don't hand out the incremented version
+            // keep old id so we don't hand out the incremented version
             let old_id = self.class_id;
             self.class_id += 1;
             old_id
@@ -108,7 +109,6 @@ impl Parser {
         })
     }
     fn consume_repeat(&mut self) -> Option<usize> {
-        // HACK: move peek() outside the condition to avoid moot borrow twice
         if let Some(&Token::Repeat(n)) = self.tokens.peek() {
             self.tokens.next();
             Some(n - 1)
@@ -169,7 +169,7 @@ mod test {
     use super::*;
     #[test]
     fn bad() {
-        let parser = Parser::new("{3}").unwrap_err();
+        "{3}".parse().unwrap_err();
         println!("{:?}", parser);
     }
 }

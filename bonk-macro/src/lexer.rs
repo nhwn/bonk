@@ -223,7 +223,7 @@ impl<'src> Lexer<'src> {
     }
 }
 
-impl<'src> Iterator for Lexer<'src> {
+impl Iterator for Lexer<'_> {
     type Item = Result<(usize, Token), ParseErr>;
     fn next(&mut self) -> Option<Self::Item> {
         self.chars.next().map(|(i, c)| {
