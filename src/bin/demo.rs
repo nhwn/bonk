@@ -1,7 +1,24 @@
-use bonk::bonk;
+use bonk::{bonk, Bonk};
+
+pub struct Attacker;
+
+impl Bonk for Attacker {
+    fn new(_id: usize) -> Self {
+        Self {}
+    }
+    fn check(&mut self, buf: &[u8]) -> bool {
+        if buf == b"69NICE69" {
+            println!("haha got it");
+            true
+        } else {
+            false
+        }
+    }
+}
 
 fn main() {
-    let time = std::time::Instant::now();
-    bonk!(r"SKY-\A{4}-\d{4}");
-    println!("{:?}", time.elapsed());
+    bonk! {
+        r"\d{2}\A{4}\d{2}",
+        Attacker
+    }
 }

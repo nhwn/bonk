@@ -1,7 +1,7 @@
-use bonk::bonk;
+use bonk::{bonk, Bonk};
 use itertools::iproduct;
 
-use criterion::{ criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 fn iproduct_macro() {
     static A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -25,16 +25,31 @@ fn iproduct_macro() {
         buf[10] = d1;
         buf[11] = d2;
         buf[12] = d3;
-        let s = unsafe { std::str::from_utf8_unchecked(&buf) };
-        if s == "SKY-BRUH-1337" {
-            println!("{}", s);
+        if &buf == b"SKY-ZZZZ-9999" {
+            println!("{}", unsafe { std::str::from_utf8_unchecked(&buf) });
             return;
         }
     }
 }
 
+struct S;
+
+impl Bonk for S {
+    fn new(_id: usize) -> Self {
+        Self
+    }
+    fn check(&mut self, buf: &[u8]) -> bool {
+        if &buf == b"SKY-ZZZZ-9999" {
+            println!("{}", unsafe { std::str::from_utf8_unchecked(&buf) });
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn bonk_macro() {
-    bonk!(r"SKY-\A{4}-\d{4}");
+    bonk!(r"SKY-\A{4}-\d{4}", S);
 }
 
 fn bench_macros(c: &mut Criterion) {

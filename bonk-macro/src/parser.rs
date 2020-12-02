@@ -10,12 +10,12 @@ use std::vec::IntoIter;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Init {
-    pub value: char,
+    pub value: u8,
     pub idx: usize,
 }
 
 impl Init {
-    fn new(value: char, idx: usize) -> Self {
+    fn new(value: u8, idx: usize) -> Self {
         Self { value, idx }
     }
 }
@@ -30,7 +30,7 @@ pub struct Run {
 pub struct Final {
     pub tasks: Vec<Vec<Run>>,
     pub max_buffer_size: usize,
-    pub statics: Dictionary,
+    pub statics: Dict,
 }
 
 impl Run {
@@ -44,15 +44,15 @@ impl Run {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Change {
-    pub buffer_idx: usize,
+    pub idx: usize,
     pub class_id: usize,
     pub span: Range<usize>,
 }
 
 impl Change {
-    fn new(buffer_idx: usize, class_id: usize, span: Range<usize>) -> Self {
+    fn new(idx: usize, class_id: usize, span: Range<usize>) -> Self {
         Self {
-            buffer_idx,
+            idx,
             class_id,
             span,
         }
@@ -60,12 +60,12 @@ impl Change {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Dictionary {
+pub struct Dict {
     pub map: HashMap<Cow<'static, str>, usize>,
     class_id: usize,
 }
 
-impl Dictionary {
+impl Dict {
     fn new() -> Self {
         Self {
             map: HashMap::new(),
@@ -95,7 +95,7 @@ struct Parser {
     buffer_idx: usize,
     changes: Vec<Change>,
     inits: Vec<Init>,
-    dict: Dictionary,
+    dict: Dict,
 }
 
 impl Parser {
@@ -105,7 +105,7 @@ impl Parser {
             buffer_idx: 0,
             changes: vec![],
             inits: vec![],
-            dict: Dictionary::new(),
+            dict: Dict::new(),
         })
     }
     fn consume_repeat(&mut self) -> Option<usize> {
@@ -116,7 +116,7 @@ impl Parser {
             None
         }
     }
-    fn char(&mut self, c: char) {
+    fn char(&mut self, c: u8) {
         self.inits.push(Init::new(c, self.buffer_idx));
         self.buffer_idx += 1;
         if let Some(n) = self.consume_repeat() {
@@ -142,7 +142,7 @@ impl Parser {
         // TODO: generalize this to support range tokens and partitioning
         while let Some(token) = self.tokens.next() {
             match token {
-                Token::Char(c) => self.char(c),
+                Token::Char(c) => self.char(c as u8),
                 Token::Class(c) => self.class(c),
                 _ => unimplemented!(),
             }
@@ -167,9 +167,4 @@ impl FromStr for Final {
 #[cfg(test)]
 mod test {
     use super::*;
-    #[test]
-    fn bad() {
-        "{3}".parse().unwrap_err();
-        println!("{:?}", parser);
-    }
 }
