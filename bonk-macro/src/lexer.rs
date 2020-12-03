@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::iter::Peekable;
-use std::ops::RangeInclusive;
+use std::ops::Range;
 use std::str::CharIndices;
 
 static DIGITS: &str = "0123456789";
@@ -27,16 +27,10 @@ pub enum Token {
     Class(Cow<'static, str>),
     Char(char),
     Repeat(usize),
-    Range(RangeInclusive<usize>),
+    Range(Range<usize>),
 }
 
 impl Token {
-    pub fn is_range(&self) -> bool {
-        matches!(self, Self::Range(_))
-    }
-    pub fn is_repeat(&self) -> bool {
-        matches!(self, Self::Repeat(_))
-    }
     pub fn is_varying(&self) -> bool {
         matches!(self, Self::Repeat(_) | Self::Range(_))
     }
@@ -58,7 +52,7 @@ impl<'src> Lexer<'src> {
             idx: 0,
         }
     }
-    /// Main driver method for validating and getting tokens
+
     pub fn tokens(self) -> Result<Vec<Token>, ParseErr> {
         // TODO: come up with a better way to determine correctness without
         // calling collect() twice
@@ -74,17 +68,13 @@ impl<'src> Lexer<'src> {
             ));
         }
         // ensure ranges/repeats are only preceded by chars or classes
-        if let Some(i) = tokens
-            .windows(2)
-            .filter_map(|s| {
-                if s.iter().all(|t| t.1.is_varying()) {
-                    Some(s[1].0)
-                } else {
-                    None
-                }
-            })
-            .next()
-        {
+        if let Some(i) = tokens.windows(2).find_map(|s| {
+            if s.iter().all(|t| t.1.is_varying()) {
+                Some(s[1].0)
+            } else {
+                None
+            }
+        }) {
             return Err(ParseErr::new(
                 "ranges and repetitions must be preceded by characters or character classes",
                 i,
@@ -177,7 +167,7 @@ impl<'src> Lexer<'src> {
                 if self.consume_char()? == '}' {
                     use Ordering::*;
                     match lower.cmp(&upper) {
-                        Less => Ok(Token::Range(lower..=upper)),
+                        Less => Ok(Token::Range(lower..upper + 1)),
                         Equal => Err(self.err(
                             "bounds cannot be equal in a range; consider using the repetition syntax",
                         )),

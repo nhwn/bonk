@@ -7,18 +7,14 @@ impl Bonk for Attacker {
         Self {}
     }
     fn check(&mut self, buf: &[u8]) -> bool {
-        if buf == b"69NICE69" {
-            println!("haha got it");
-            true
-        } else {
-            false
-        }
+        println!("{:?}", std::str::from_utf8(&buf).unwrap());
+        false
     }
 }
 
 fn main() {
     bonk! {
-        r"\d{2}\A{4}\d{2}",
+        r"a[ABC]{0,3}",
         Attacker
     }
 }
