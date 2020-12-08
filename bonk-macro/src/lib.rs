@@ -17,15 +17,13 @@ struct Config {
 
 impl Parse for Config {
     fn parse(input: ParseStream) -> parse::Result<Self> {
-        let flag = input.parse::<LitStr>()?;
+        let pattern = input.parse::<LitStr>()?;
         input.parse::<syn::Token![,]>()?;
-        Ok(Config {
-            handler: input.parse()?,
-            result: flag
-                .value()
-                .parse()
-                .map_err(|e: ParseErr| Error::new(flag.span(), e.msg))?,
-        })
+        let handler = input.parse::<Ident>()?;
+        let num_cpus = num_cpus::get();
+        let result = Final::new(&pattern.value(), num_cpus)
+            .map_err(|e: ParseErr| Error::new(pattern.span(), e.msg))?;
+        Ok(Config { handler, result })
     }
 }
 
@@ -37,7 +35,7 @@ pub fn bonk(input: TokenStream) -> TokenStream {
             Final {
                 tasks,
                 statics,
-                max_buffer_size,
+                max_size: max_buffer_size,
             },
     } = parse_macro_input!(input as Config);
     let statics = statics.into_iter().map(|(k, v)| {
@@ -53,7 +51,7 @@ pub fn bonk(input: TokenStream) -> TokenStream {
                  inits,
                  changes,
              }| {
-                let assignments = inits.into_iter().map(|Init { idx, value }| {
+                let assignments = inits.into_iter().map(|Init { idx, val: value }| {
                     let value = value as u8;
                     quote! { buf[#idx] = #value; }
                 });
@@ -68,8 +66,8 @@ pub fn bonk(input: TokenStream) -> TokenStream {
                      Change {
                          class_id,
                          idx,
-                         start,
-                         end,
+                         lower: start,
+                         upper: end,
                      }| {
                         let class_ident = format_ident!("CLASS_{}", class_id);
                         let value_ident = format_ident!("c_{}", idx);

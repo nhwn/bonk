@@ -14,7 +14,7 @@ impl Bonk for Attacker {
 
 fn main() {
     bonk! {
-        r"a[ABC]{0,3}",
+        r"a{3}\a{10}",
         Attacker
     }
 }
