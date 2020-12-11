@@ -2,34 +2,41 @@ use super::{Lexer, ParseErr, Token};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::iter::Peekable;
+
+pub enum Partition {
+    Weak,
+    Aggressive,
+}
+
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Init {
-    pub val: char,
-    pub idx: usize,
+    pub val: u8,
+    pub buf_idx: usize,
 }
 
 impl Init {
-    fn new(idx: usize, val: char) -> Self {
-        Self { val, idx }
+    fn new(buf_idx: usize, val: u8) -> Self {
+        Self { val, buf_idx }
     }
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Change {
-    pub idx: usize,
+    pub buf_idx: usize,
     pub class_id: usize,
     pub lower: usize,
     pub upper: usize,
 }
 
 impl Change {
-    fn new(idx: usize, class_id: usize, end: usize) -> Self {
+    fn new(idx: usize, class_id: usize, upper: usize) -> Self {
         Self {
-            idx,
+            buf_idx: idx,
             class_id,
             lower: 0,
-            upper: end,
+            upper,
         }
     }
 }
@@ -42,44 +49,47 @@ pub struct Run {
 }
 
 impl Run {
-    fn visit_uppers(&mut self) -> impl Iterator<Item = &mut usize> {
-        self.changes.iter_mut().map(|c| &mut c.upper)
+    fn visit_bounds(&mut self) -> impl Iterator<Item = (&mut usize, &mut usize)> {
+        self.changes
+            .iter_mut()
+            .map(|c| (&mut c.lower, &mut c.upper))
     }
-    fn visit_lowers(&mut self) -> impl Iterator<Item = &mut usize> {
-        self.changes.iter_mut().map(|c| &mut c.lower)
+    fn append<F, I, T>(cons: F, tokens: &mut Peekable<I>, target: &mut Vec<T>, other_len: usize)
+    where
+        I: Iterator<Item = Token>,
+        F: Fn(usize) -> T,
+    {
+        let buf_idx = target.len() + other_len;
+        target.push(cons(buf_idx));
+        if let Some(&Token::Repeat(n)) = tokens.peek() {
+            tokens.next();
+            if n > 1 {
+                let buf_idx = target.len() + other_len;
+                // n - 1 because we always push once before checking for repeats
+                target.extend((buf_idx..buf_idx + n - 1).map(cons));
+            } else if n == 0 {
+                target.pop();
+            }
+        }
     }
-    fn new(ts: &[Token]) -> Self {
-        let mut ts = ts.iter().copied().peekable();
+    fn new(tokens: &[Token]) -> Self {
+        let mut tokens = tokens.iter().cloned().peekable();
         let mut inits = vec![];
         let mut changes = vec![];
-        while let Some(t) = ts.next() {
+        while let Some(t) = tokens.next() {
             match t {
-                Token::Char(c) => {
-                    let idx = inits.len() + changes.len();
-                    inits.push(Init::new(idx, c));
-                    if let Some(&Token::Repeat(n)) = ts.peek() {
-                        ts.next();
-                        if n > 1 {
-                            let idx = inits.len() + changes.len();
-                            inits.extend((idx..idx + n - 1).map(|i| Init::new(i, c)));
-                        } else if n == 0 {
-                            inits.pop();
-                        }
-                    }
-                }
-                Token::Class { id, len } => {
-                    let idx = inits.len() + changes.len();
-                    changes.push(Change::new(idx, id, len));
-                    if let Some(&Token::Repeat(n)) = ts.peek() {
-                        ts.next();
-                        if n > 1 {
-                            let idx = inits.len() + changes.len();
-                            changes.extend((idx..idx + n - 1).map(|i| Change::new(i, id, len)));
-                        } else if n == 0 {
-                            changes.pop();
-                        }
-                    }
-                }
+                Token::Char(c) => Self::append(
+                    |buf_idx| Init::new(buf_idx, c),
+                    &mut tokens,
+                    &mut inits,
+                    changes.len(),
+                ),
+                Token::Class { id, len } => Self::append(
+                    |buf_idx| Change::new(buf_idx, id, len),
+                    &mut tokens,
+                    &mut changes,
+                    inits.len(),
+                ),
                 _ => unreachable!(),
             }
         }
@@ -106,7 +116,7 @@ impl Permutor {
     fn get_iter(&self, i: usize) -> impl Iterator<Item = usize> + '_ {
         let mut rem = i;
         // we reverse to start incrementing from the back
-        for (slot, max) in self.buf.iter().zip(self.maxs.iter().copied()).rev() {
+        for (slot, max) in self.buf.iter().zip(self.maxs.iter()).rev() {
             let modulo = rem % max;
             slot.set(modulo);
             rem = (rem - modulo) / max;
@@ -116,6 +126,7 @@ impl Permutor {
     }
 
     fn total(&self) -> usize {
+        // FIXME: this can easily overflow for long queries, maybe enforce u64?
         self.maxs.iter().product()
     }
 
@@ -132,11 +143,10 @@ pub struct Final {
 }
 
 impl Final {
-    pub fn new(src: &str, num_tasks: usize) -> Result<Final, ParseErr> {
+    pub fn new(src: &str, num_threads: usize, part: Partition) -> Result<Self, ParseErr> {
         let (statics, mut tokens) = Lexer::tokenize(src)?;
         let (bounds, range_idxs): (Vec<_>, Vec<_>) = tokens
             .iter()
-            .copied()
             .enumerate()
             .filter_map(|(i, t)| {
                 if let Token::Range { lower, upper } = t {
@@ -146,6 +156,7 @@ impl Final {
                 }
             })
             .unzip();
+
         let runs = if range_idxs.is_empty() {
             vec![Run::new(&tokens)]
         } else {
@@ -162,22 +173,34 @@ impl Final {
                 .collect()
         };
 
-        let max_size = runs.iter().map(|run| run.len).max().unwrap();
-        let tasks = Self::partition(runs, num_tasks);
+        let max_size = runs
+            .iter()
+            .map(|run| run.len)
+            .max()
+            .expect("runs is nonempty");
 
-        Ok(Final {
+        let tasks = match part {
+            Partition::Weak => Self::weak_partition(runs, num_threads),
+            Partition::Aggressive => Self::aggressive_partition(runs, num_threads),
+        };
+
+        Ok(Self {
             max_size,
             tasks,
             statics,
         })
     }
-
-    fn partition(mut runs: Vec<Run>, num_tasks: usize) -> Vec<Vec<Run>> {
-        // let changes = runs
+    fn aggressive_partition(runs: Vec<Run>, n: usize) -> Vec<Vec<Run>>{
+        // let changes = self.tasks
+        //     .first()
+        //     .expect()
         //     .iter()
         //     .map(|run| run.changes.iter().map(|c| c.upper).product())
         //     .collect::<Vec<usize>>();
         // vec![runs; num_tasks]
-        vec![runs]
+        vec![runs; n]
+    }
+    fn weak_partition(runs: Vec<Run>, n: usize) -> Vec<Vec<Run>> {
+        vec![runs; n]
     }
 }

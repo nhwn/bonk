@@ -9,6 +9,7 @@ static UPPERCASE_ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 static LOWERCASE_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz";
 static LOWERCASE_HEX: &str = "0123456789abcdef";
 static UPPERCASE_HEX: &str = "0123456789ABCDEF";
+static ALPHANUMERIC: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_";
 
 #[derive(Debug, PartialEq)]
 pub struct ParseErr {
@@ -22,11 +23,11 @@ impl ParseErr {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     Class { id: usize, len: usize },
     Range { lower: usize, upper: usize },
-    Char(char),
+    Char(u8),
     Repeat(usize),
 }
 
@@ -42,33 +43,46 @@ pub struct Lexer<'s, 'd> {
     chars: Peekable<CharIndices<'s>>,
     src: &'s str,
     idx: usize,         // the index of the char that was just consumed
-    dict: &'d mut Dict, // this is a reference so we can use collect() and still move the HashMap out
+    dict: &'d mut Dict, // this is a reference so we can use collect() and still use the HashMap
     id: usize,
 }
 
 impl<'s, 'd> Lexer<'s, 'd> {
     pub fn tokenize(src: &str) -> Result<(Dict, Vec<Token>), ParseErr> {
-        let mut map = HashMap::new();
-        let tokens = Lexer::new(src, &mut map).collect::<Result<Vec<_>, _>>()?;
-
-        if tokens.is_empty() {
-            return Err(ParseErr::new("pattern must be nonempty", 0));
-        }
-
-        if tokens.first().unwrap().1.is_varying() {
+        if let Some(i) = src
+            .char_indices()
+            .find_map(|(i, c)| if !c.is_ascii() { Some(i) } else { None })
+        {
             return Err(ParseErr::new(
-                "pattern must begin with a character or character class",
-                0,
+                "pattern should only contain ASCII characters",
+                i,
             ));
         }
 
-        if let Some(i) = tokens
-            .windows(2)
-            .find(|s| s.iter().all(|t| t.1.is_varying()))
-            .map(|s| s[1].0)
+        let mut map = HashMap::new();
+        let tokens = Lexer::new(src, &mut map).collect::<Result<Vec<_>, _>>()?;
+
+        if tokens
+            .first()
+            .ok_or_else(|| ParseErr::new("pattern should be nonempty", 0))?
+            .1
+            .is_varying()
         {
             return Err(ParseErr::new(
-                "ranges and repetitions must be preceded by characters or character classes",
+                "pattern should begin with a character or character class",
+                0,
+            ));
+        };
+
+        if let Some(i) = tokens.windows(2).find_map(|s| {
+            if s.iter().all(|t| t.1.is_varying()) {
+                Some(s[1].0)
+            } else {
+                None
+            }
+        }) {
+            return Err(ParseErr::new(
+                "ranges and repeats should be preceded by characters or character classes",
                 i,
             ));
         }
@@ -107,8 +121,7 @@ impl<'s, 'd> Lexer<'s, 'd> {
     {
         if let Some(&(_, c_inner)) = self.chars.peek() {
             if (predicate)(c_inner) {
-                // we just successfully peeked
-                self.consume_char().unwrap();
+                self.consume_char().expect("we just peeked");
                 Ok(Some(c_inner))
             } else {
                 Ok(None)
@@ -122,10 +135,12 @@ impl<'s, 'd> Lexer<'s, 'd> {
     fn consume_number(&mut self) -> Result<usize, ParseErr> {
         if self.consume_char()?.is_ascii_digit() {
             let start = self.idx;
-            // NOTE: can't use take_while here because we don't want to consume a non-digit
+            // NOTE: take_while isn't an option because we don't want to consume a non-digit,
+            // and we need to somehow advance the index to parse the substring
             while self.consume_if(|c| c.is_ascii_digit())?.is_some() {}
-            // we just ensured valid digits
-            Ok(self.src[start..=self.idx].parse().unwrap())
+            self.src[start..=self.idx]
+                .parse()
+                .map_err(|_| ParseErr::new("range bounds should not exceed a usize", start))
         } else {
             Err(self.err("expected positive integer"))
         }
@@ -144,11 +159,12 @@ impl<'s, 'd> Lexer<'s, 'd> {
     /// - "\]" is a literal closing bracket
     /// - "\{" is a literal opening curly brace
     /// - "\}" is a literal closing curly brace
-    /// - "\A" is a character class of the uppercase letters
-    /// - "\a" is a character class of the lowercase letters
-    /// - "\d" is a character class of the digits in base 10
-    /// - "\h" is a character class of the digits in base 16 (lowercase)
-    /// - "\H" is a character class of the digits in base 16 (uppercase)
+    /// - "\A" is a character class of [A-Z]
+    /// - "\a" is a character class of [a-z]
+    /// - "\d" is a character class of [0-9]
+    /// - "\h" is a character class of [0-9A-F]
+    /// - "\H" is a character class of [0-9a-f]
+    /// - "\w" is a character class of [A-Za-z0-9_]
     fn backslash(&mut self) -> Result<Token, ParseErr> {
         match self.consume_char()? {
             'd' => Ok(self.class(DIGITS.into())),
@@ -156,19 +172,18 @@ impl<'s, 'd> Lexer<'s, 'd> {
             'a' => Ok(self.class(LOWERCASE_ALPHABET.into())),
             'H' => Ok(self.class(UPPERCASE_HEX.into())),
             'h' => Ok(self.class(LOWERCASE_HEX.into())),
-            '\\' => Ok(Token::Char('\\')),
-            '[' => Ok(Token::Char('[')),
-            ']' => Ok(Token::Char(']')),
-            '{' => Ok(Token::Char('{')),
-            '}' => Ok(Token::Char('}')),
-            _ => {
-                Err(self.err("backslashes must be followed by a '\\', 'd', 'A', 'a', 'H', or 'h'"))
-            }
+            'w' => Ok(self.class(ALPHANUMERIC.into())),
+            '\\' => Ok(Token::Char(b'\\')),
+            '[' => Ok(Token::Char(b'[')),
+            ']' => Ok(Token::Char(b']')),
+            '{' => Ok(Token::Char(b'{')),
+            '}' => Ok(Token::Char(b'}')),
+            _ => Err(self.err("'\\' should be followed by '\\', 'd', 'A', 'a', 'H', 'h', or 'w'")),
         }
     }
     /// Returns a range or repeat token
     fn left_curly(&mut self) -> Result<Token, ParseErr> {
-        let opening_idx = self.idx;
+        let start = self.idx;
         let lower = self.consume_number()?;
         match self.consume_char()? {
             ',' => {
@@ -177,26 +192,24 @@ impl<'s, 'd> Lexer<'s, 'd> {
                     use Ordering::*;
                     match lower.cmp(&upper) {
                         Less => Ok(Token::Range {lower, upper}),
-                        Equal => Err(self.err(
-                            "bounds cannot be equal in a range; consider using the repetition syntax",
-                        )),
-                        Greater => Err(self.err("lower bound must be less than upper bound")),
+                        Equal => Err(ParseErr::new("a range's bounds should not be equal; consider using the repeat syntax", start)),
+                        Greater => Err(ParseErr::new("a range's lower bound should be less the upper bound", start)),
                     }
                 } else {
                     Err(self.err("expected closing '}' for range"))
                 }
             }
             '}' => {
-                if lower <= 1 {
-                    Err(ParseErr::new(
-                        "number of repetition must be greater than 1",
-                        opening_idx + 1,
-                    ))
-                } else {
+                if lower > 1 {
                     Ok(Token::Repeat(lower))
+                } else {
+                    Err(ParseErr::new(
+                        "number of repeats in a repetition should be greater than 1",
+                        start,
+                    ))
                 }
             }
-            _ => Err(self.err("expected closing '}' for repetition")),
+            _ => Err(self.err("expected closing '}' for repeat")),
         }
     }
     /// Returns a character class token
@@ -205,14 +218,16 @@ impl<'s, 'd> Lexer<'s, 'd> {
         loop {
             match self.consume_char()? {
                 ']' => return Ok(self.class(buf.into())),
-                '[' => return Err(self.err("escape [ in character classes")),
+                '[' => {
+                    return Err(self.err("'[' should be preceded with a '\\' in character classes"))
+                }
                 '\\' => {
                     let c = self
                         .consume_if(|c| matches!(c, '\\' | '[' | ']'))?
                         .ok_or_else(|| {
                             self.err(
-                            "backslashes in character classes must be followed by a ']', '[', or '\\'",
-                        )
+                                "'\\' should be followed by ']', '[', or '\\' in character classes",
+                            )
                         })?;
                     buf.push(c);
                 }
@@ -231,9 +246,9 @@ impl<'s, 'd> Iterator for Lexer<'s, 'd> {
                 '\\' => self.backslash(),
                 '{' => self.left_curly(),
                 '[' => self.left_bracket(),
-                ']' => Err(self.err("] has no matching [")),
-                '}' => Err(self.err("} has no matching {")),
-                _ => Ok(Token::Char(c)),
+                ']' => Err(self.err("unexpected ']'")),
+                '}' => Err(self.err("unexpected '}'")),
+                _ => Ok(Token::Char(c as u8)),
             }
             .map(|t| (i, t))
         })
@@ -244,26 +259,31 @@ impl<'s, 'd> Iterator for Lexer<'s, 'd> {
 mod test {
     use super::*;
     fn ok_parse(src: &str, v: Vec<Token>) {
-        let toks: Vec<Token> = tokenize(src).unwrap().1;
-        assert_eq!(v, toks)
+        assert_eq!(Lexer::tokenize(src).unwrap().1, v);
     }
     fn err_parse(src: &str) {
-        let err = tokenize(src).unwrap_err();
-        println!("error: {}", err.msg);
-        println!("  |");
-        println!("  | {}", src);
-        println!("  | {}^", " ".repeat(err.offset));
-        println!("  |");
+        let err = Lexer::tokenize(src).unwrap_err();
+        eprintln!("error: {}", err.msg);
+        eprintln!("  |");
+        eprintln!("  | {}", src);
+        eprintln!("  | {}^", " ".repeat(err.offset));
+        eprintln!("  |");
     }
     #[test]
-    fn empty() {
+    fn misc_errors() {
         err_parse("");
+        err_parse("]");
+        err_parse("}");
+        err_parse("\\s");
+        err_parse("definitely ascii❤");
     }
     #[test]
     fn literal() {
+        ok_parse("\x00", vec![Token::Char(0)]);
+        ok_parse("\x7F", vec![Token::Char(127)]);
         ok_parse(
             "foo",
-            vec![Token::Char('f'), Token::Char('o'), Token::Char('o')],
+            vec![Token::Char(b'f'), Token::Char(b'o'), Token::Char(b'o')],
         );
         ok_parse(
             r"\H\h\A\a\d",
@@ -278,10 +298,10 @@ mod test {
         ok_parse(
             r"\[\]\{\}",
             vec![
-                Token::Char('['),
-                Token::Char(']'),
-                Token::Char('{'),
-                Token::Char('}'),
+                Token::Char(b'['),
+                Token::Char(b']'),
+                Token::Char(b'{'),
+                Token::Char(b'}'),
             ],
         );
     }
@@ -300,26 +320,43 @@ mod test {
         err_parse("[\\a]");
     }
     #[test]
+    fn repeat() {
+        ok_parse("a{3}", vec![Token::Char(b'a'), Token::Repeat(3)]);
+        err_parse("a{12,}");
+        err_parse("{1}");
+        err_parse("a{0}");
+        err_parse("a{234092348903248032948392342349089}");
+    }
+    #[test]
     fn range() {
-        ok_parse("a{3}", vec![Token::Char('a'), Token::Repeat(3)]);
         ok_parse(
             "a{3,5}",
-            vec![Token::Char('a'), Token::Range { lower: 3, upper: 5 }],
+            vec![Token::Char(b'a'), Token::Range { lower: 3, upper: 5 }],
         );
         ok_parse(
             "a{30,50}",
             vec![
-                Token::Char('a'),
+                Token::Char(b'a'),
                 Token::Range {
                     lower: 30,
                     upper: 50,
                 },
             ],
         );
+        ok_parse(
+            r"\a{1,10}",
+            vec![
+                Token::Class { id: 1, len: 26 },
+                Token::Range {
+                    lower: 1,
+                    upper: 10,
+                },
+            ],
+        );
         err_parse("a{}");
         err_parse("a{,}");
-        err_parse("a{12,}");
         err_parse("a{12,12}");
         err_parse("a{3,1}");
+        err_parse("a{1,234092348903248032948392342349089}");
     }
 }
