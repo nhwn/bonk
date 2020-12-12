@@ -2,13 +2,13 @@ use super::{Lexer, ParseErr, Token};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::iter::repeat;
 use std::iter::Peekable;
 
 pub enum Partition {
-    Weak,
-    Aggressive,
+    Naive,
+    None,
 }
-
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Init {
@@ -49,11 +49,6 @@ pub struct Run {
 }
 
 impl Run {
-    fn visit_bounds(&mut self) -> impl Iterator<Item = (&mut usize, &mut usize)> {
-        self.changes
-            .iter_mut()
-            .map(|c| (&mut c.lower, &mut c.upper))
-    }
     fn append<F, I, T>(cons: F, tokens: &mut Peekable<I>, target: &mut Vec<T>, other_len: usize)
     where
         I: Iterator<Item = Token>,
@@ -180,8 +175,8 @@ impl Final {
             .expect("runs is nonempty");
 
         let tasks = match part {
-            Partition::Weak => Self::weak_partition(runs, num_threads),
-            Partition::Aggressive => Self::aggressive_partition(runs, num_threads),
+            Partition::Naive => Self::weak_partition(runs, num_threads),
+            Partition::None => vec![runs],
         };
 
         Ok(Self {
@@ -190,17 +185,32 @@ impl Final {
             statics,
         })
     }
-    fn aggressive_partition(runs: Vec<Run>, n: usize) -> Vec<Vec<Run>>{
-        // let changes = self.tasks
-        //     .first()
-        //     .expect()
-        //     .iter()
-        //     .map(|run| run.changes.iter().map(|c| c.upper).product())
-        //     .collect::<Vec<usize>>();
-        // vec![runs; num_tasks]
-        vec![runs; n]
-    }
     fn weak_partition(runs: Vec<Run>, n: usize) -> Vec<Vec<Run>> {
-        vec![runs; n]
+        let mut tasks = vec![Vec::with_capacity(runs.len()); n];
+
+        for run in runs {
+            if let Some(t) = run.changes.first() {
+                let t = t.upper;
+                repeat(t / n + 1)
+                    .take(t % n)
+                    .chain(repeat(t / n).take(n - t % n))
+                    .scan(0, |acc, cur| {
+                        let old = *acc;
+                        *acc += cur;
+                        Some((old, *acc))
+                    })
+                    .map(|(lower, upper)| {
+                        let mut run = run.clone();
+                        run.changes[0].lower = lower;
+                        run.changes[0].upper = upper;
+                        run
+                    })
+                    .enumerate()
+                    .for_each(|(i, run)| tasks[i].push(run));
+            } else {
+                tasks[0].push(run);
+            }
+        }
+        tasks
     }
 }

@@ -1,20 +1,26 @@
 use bonk::{bonk, Bonk};
 
-pub struct Attacker;
+pub struct Attacker {}
 
 impl Bonk for Attacker {
     fn new(_id: usize) -> Self {
         Self {}
     }
     fn check(&mut self, buf: &[u8]) -> bool {
-        println!("{:?}", std::str::from_utf8(&buf).unwrap());
-        false
+        if buf == b"CTF{bru3e_f0rc3}" {
+            println!("{:?}", &buf);
+            true
+        } else {
+            false
+        }
     }
 }
 
 fn main() {
     bonk! {
-        "\\a{10}",
-        Attacker
+        r"LOL\a{0,3}",
+        Attacker,
+        true,
+        true
     }
 }

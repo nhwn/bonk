@@ -49,7 +49,7 @@ impl Bonk for S {
 }
 
 fn bonk_macro() {
-    bonk!(r"SKY-\A{4}-\d{4}", S);
+    bonk!(r"SKY-\A{4}-\d{4}", S, true, true);
 }
 
 fn bench_macros(c: &mut Criterion) {

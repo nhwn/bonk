@@ -10,7 +10,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Literal, Span};
 use quote::{format_ident, quote};
 use syn::parse::{self, Parse, ParseStream};
-use syn::{parse_macro_input, Error, Ident, LitStr, Token};
+use syn::{parse_macro_input, Error, Ident, LitBool, LitStr, Token};
 
 struct Config {
     handler: Ident,
@@ -31,13 +31,19 @@ impl Parse for Config {
         let pattern = literal.value();
         input.parse::<Token![,]>()?;
         let handler = input.parse::<Ident>()?;
+        input.parse::<Token![,]>()?;
+        let abort = input.parse::<LitBool>()?.value;
+        input.parse::<Token![,]>()?;
+        let threaded = input.parse::<LitBool>()?.value;
         let num_threads = num_cpus::get();
-        let abort = false;
-        let threaded = true;
-        let result =
-            Final::new(&pattern, num_threads, Partition::Weak).map_err(|e: ParseErr| {
-                Error::new(make_span(&pattern, e.offset, literal.span()), e.msg)
-            })?;
+        let part = if !threaded {
+            Partition::None
+        } else {
+            Partition::Naive
+        };
+        let result = Final::new(&pattern, num_threads, part).map_err(|e: ParseErr| {
+            Error::new(make_span(&pattern, e.offset, literal.span()), e.msg)
+        })?;
 
         Ok(Config {
             handler,
@@ -78,17 +84,27 @@ pub fn bonk(input: TokenStream) -> TokenStream {
                 let assignments = inits
                     .into_iter()
                     .map(|Init { buf_idx, val }| quote! { buf[#buf_idx] = #val; });
+                let check = quote! {
+                    <#handler as ::bonk::Bonk>::check(&mut bonker, &buf[0..#len])
+                };
                 let body = if abort {
                     quote! {
-                        if <#handler as ::bonk::Bonk>::check(&mut bonker, &buf[0..#len]) {
+                        if #check {
                             ::std::process::exit(0);
+                        }
+                    }
+                } else if threaded {
+                    quote! {
+                        if flag.load(::std::sync::atomic::Ordering::Relaxed) || #check {
+                            // this will cause unnecessary writes in threads that
+                            // haven't finished, but the overhead is probably negligible?
+                            flag.store(true, ::std::sync::atomic::Ordering::Relaxed);
+                            return;
                         }
                     }
                 } else {
                     quote! {
-                        if flag.load(::std::sync::atomic::Ordering::Relaxed)
-                            || <#handler as ::bonk::Bonk>::check(&mut bonker, &buf[0..#len]) {
-                            flag.store(true, ::std::sync::atomic::Ordering::Relaxed);
+                        if #check {
                             return;
                         }
                     }
@@ -118,65 +134,55 @@ pub fn bonk(input: TokenStream) -> TokenStream {
                 }
             },
         );
-        let output = quote! {
+        let mut output = quote! {
             let mut buf = [0u8; MAX_SIZE];
             let mut bonker = <#handler as ::bonk::Bonk>::new(#thread_id);
             #(#task)*
         };
-        let output = if abort {
-            output
-        } else {
+        if !abort && threaded {
             let flag_ident = format_ident!("flag_{}", thread_id);
-            quote! {
+            output = quote! {
                 let mut flag = #flag_ident;
                 #output
             }
-        };
-        let output = if threaded {
+        }
+        if threaded {
             let thread_ident = format_ident!("t_{}", thread_id);
-            quote! {
+            output = quote! {
                 let #thread_ident = ::std::thread::spawn(move || {
                     #output
                 });
-            }
-        } else {
-            output
-        };
-        let output = if abort {
-            output
-        } else {
+            };
+        }
+        if !abort && threaded {
             let flag_ident = format_ident!("flag_{}", thread_id);
-            quote! {
+            output = quote! {
                 let #flag_ident = flag.clone();
                 #output
             }
-        };
+        }
         output
     });
-    let output = quote! {
+    let mut output = quote! {
         const MAX_SIZE: usize = #max_size;
         #(#statics)*
         #(#tasks)*
     };
-    let output = if abort {
-        output
-    } else {
-        quote! {
-            let flag = ::std::sync::Arc::new(::std::sync::atomic::AtomicBool::new(false));
-            #output
-        }
-    };
-    let output = if threaded {
+    if threaded {
         let joins = (0..num_threads).map(|thread_id| {
             let thread_ident = format_ident!("t_{}", thread_id);
             quote! { #thread_ident.join().unwrap(); }
         });
-        quote! {
+        output = quote! {
             #output
             #(#joins)*
         }
-    } else {
-        output
-    };
+    }
+    if !abort && threaded {
+        output = quote! {
+            let flag = ::std::sync::Arc::new(::std::sync::atomic::AtomicBool::new(false));
+            #output
+        };
+    }
     output.into()
 }
